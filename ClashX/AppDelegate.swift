@@ -53,6 +53,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItemView: StatusItemView!
     var isSpeedTesting = false
 
+    var runAfterConfigReload: (() -> Void)?
+
     var dashboardWindowController: ClashWebViewWindowController?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -71,7 +73,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItemView.frame = CGRect(x: 0, y: 0, width: statusItemLengthWithSpeed, height: 22)
         statusMenu.delegate = self
         setupStatusMenuItemData()
-
         DispatchQueue.main.async {
             self.postFinishLaunching()
         }
@@ -81,6 +82,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         defer {
             statusItem.menu = statusMenu
         }
+        iCloudManager.shared.setup()
         setupExperimentalMenuItem()
 
         // install proxy helper
@@ -96,6 +98,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // start proxy
         initClashCore()
         setupData()
+        runAfterConfigReload = { [weak self] in
+            self?.selectOutBoundModeWithMenory()
+            if !ConfigManager.builtInApiMode {
+                self?.selectAllowLanWithMenory()
+            }
+        }
         updateConfig(showNotification: false)
         updateLoggingLevel()
 
@@ -224,8 +232,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
                 self.proxyModeMenuItem.title = "\(NSLocalizedString("Proxy Mode", comment: "")) (\(config.mode.name))"
 
-                if old?.port != config.port && ConfigManager.shared.proxyPortAutoSet {
-                    SystemProxyManager.shared.enableProxy(port: config.port, socksPort: config.socketPort)
+                if old?.port != config.port || old?.socketPort != config.socketPort {
+                    Logger.log("port config updated,new: \(config.port),\(config.socketPort)")
+                    if ConfigManager.shared.proxyPortAutoSet {
+                        SystemProxyManager.shared.enableProxy(port: config.port, socksPort: config.socketPort)
+                    }
                 }
 
                 self.httpPortMenuItem.title = "Http Port: \(config.port)"
@@ -312,12 +323,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func updateConfigFiles() {
         guard let menu = configSeparatorLine.menu else { return }
-        let lineIndex = menu.items.firstIndex(of: configSeparatorLine)!
-        for _ in 0..<lineIndex {
-            menu.removeItem(at: 0)
-        }
-        for item in MenuItemFactory.generateSwitchConfigMenuItems().reversed() {
-            menu.insertItem(item, at: 0)
+        MenuItemFactory.generateSwitchConfigMenuItems {
+            items in
+            let lineIndex = menu.items.firstIndex(of: self.configSeparatorLine)!
+            for _ in 0..<lineIndex {
+                menu.removeItem(at: 0)
+            }
+            for item in items.reversed() {
+                menu.insertItem(item, at: 0)
+            }
         }
     }
 
@@ -344,7 +358,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         Logger.log("Trying start proxy")
-        let string = run(ConfigManager.builtInApiMode.goObject())?.toString() ?? ""
+        let string = run(ConfigManager.builtInApiMode.goObject(), ConfigManager.allowConnectFromLan.goObject())?.toString() ?? ""
         let jsonData = string.data(using: .utf8) ?? Data()
         if let res = try? JSONDecoder().decode(StartProxyResp.self, from: jsonData) {
             let port = res.externalController.components(separatedBy: ":").last ?? "9090"
@@ -395,8 +409,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             } else {
                 self.syncConfig()
                 self.resetStreamApi()
-                self.selectOutBoundModeWithMenory()
-                self.selectAllowLanWithMenory()
+                self.runAfterConfigReload?()
+                self.runAfterConfigReload = nil
                 if showNotification {
                     NSUserNotificationCenter.default
                         .post(title: NSLocalizedString("Reload Config Succeed", comment: ""),
@@ -421,6 +435,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if WebPortalManager.hasWebProtal {
             WebPortalManager.shared.addWebProtalMenuItem(&statusMenu)
         }
+        iCloudManager.shared.addEnableMenuItem(&experimentalMenu)
         AutoUpgardeManager.shared.setup()
         AutoUpgardeManager.shared.addChanelMenuItem(&experimentalMenu)
         updateExperimentalFeatureStatus()
